@@ -6,8 +6,11 @@ plugins:
   - request-transformer
   - response-transformer-advanced
   - request-transformer-advanced
+  - rate-limiting
   - rate-limiting-advanced
   - correlation-id
   - opentelemetry
   - mocking
   - cors
+  - request-validator
+  - http-log
