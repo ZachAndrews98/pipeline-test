@@ -204,8 +204,7 @@ class Builder:
             "terraform": {
                 "required_version": ">= 1.9",
                 "required_providers": {"konnect": {"source": "kong/konnect", "version": "~> 3.19"}},
-                # Partial config: the workflow supplies storage account/container/key.
-                "backend": {"azurerm": {}},
+                "backend": {"local": {}},   # temporary local state; azurerm disabled (no tenant ID yet)
             },
             # Auth comes from KONNECT_SPAT in the environment; never in code.
             "provider": {"konnect": {"server_url": self.env["konnect"]["server_url"]}},

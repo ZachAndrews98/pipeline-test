@@ -11,8 +11,9 @@
 #                           TEST_CLIENT_ID, TEST_CLIENT_SECRET, TEST_SCOPE,
 #                           WRONG_ISSUER_TOKEN, LOW_SCOPE_TOKEN (optional)
 # Repository secret:        SPEC_REPO_TOKEN (optional; read access to repos that hold external OAS files)
-# Per-environment variables: KONNECT_CONTROL_PLANE_ID, TFSTATE_RESOURCE_GROUP, TFSTATE_STORAGE_ACCOUNT,
-#                           TFSTATE_CONTAINER, ARM_CLIENT_ID, ARM_TENANT_ID, ARM_SUBSCRIPTION_ID
+# Per-environment variables: KONNECT_CONTROL_PLANE_ID
+# State: TEMPORARY local terraform.tfstate passed plan -> apply as part of the artifact. Azure Storage
+# (azurerm) backend is disabled until a tenant ID is available.
 name: deploy-target
 
 on:
@@ -29,16 +30,11 @@ on:
 
 permissions:
   contents: read
-  id-token: write
 
 jobs:
   plan:
     runs-on: ubuntu-latest
     env:    # job-level so environment-scoped secrets/vars resolve
-      ARM_USE_OIDC: "true"
-      ARM_CLIENT_ID: ${{ vars.ARM_CLIENT_ID }}
-      ARM_TENANT_ID: ${{ vars.ARM_TENANT_ID }}
-      ARM_SUBSCRIPTION_ID: ${{ vars.ARM_SUBSCRIPTION_ID }}
       KONNECT_SPAT: ${{ secrets.KONNECT_SPAT }}
       TF_VAR_control_plane_id: ${{ vars.KONNECT_CONTROL_PLANE_ID }}
       TF_IN_AUTOMATION: "1"
@@ -72,13 +68,8 @@ jobs:
           DESTROY=""; [ "${{ inputs.mode }}" = "destroy" ] && DESTROY="-destroy"
           for d in */; do
             d=${d%/}
-            key=$(python -c "import json;print(json.load(open('$d/meta.json'))['state_key'])")
-            echo "::group::terraform plan $d ($key)"
-            terraform -chdir="$d" init -input=false \
-              -backend-config="resource_group_name=${{ vars.TFSTATE_RESOURCE_GROUP }}" \
-              -backend-config="storage_account_name=${{ vars.TFSTATE_STORAGE_ACCOUNT }}" \
-              -backend-config="container_name=${{ vars.TFSTATE_CONTAINER }}" \
-              -backend-config="key=$key" -backend-config="use_azuread_auth=true"
+            echo "::group::terraform plan $d"
+            terraform -chdir="$d" init -input=false     # local backend: state is the temporary terraform.tfstate in $d
             terraform -chdir="$d" plan -input=false -lock-timeout=5m $DESTROY -out=tfplan
             terraform -chdir="$d" show -json tfplan > "$d/plan.json"
             # C1: refuse any change to entities outside this API's tags
@@ -108,10 +99,6 @@ jobs:
     if: inputs.mode == 'apply' || inputs.mode == 'destroy'
     runs-on: ubuntu-latest
     env:    # job-level so environment-scoped secrets/vars resolve
-      ARM_USE_OIDC: "true"
-      ARM_CLIENT_ID: ${{ vars.ARM_CLIENT_ID }}
-      ARM_TENANT_ID: ${{ vars.ARM_TENANT_ID }}
-      ARM_SUBSCRIPTION_ID: ${{ vars.ARM_SUBSCRIPTION_ID }}
       KONNECT_SPAT: ${{ secrets.KONNECT_SPAT }}
       TF_VAR_control_plane_id: ${{ vars.KONNECT_CONTROL_PLANE_ID }}
       TF_IN_AUTOMATION: "1"
@@ -139,12 +126,7 @@ jobs:
           mkdir -p "$GITHUB_WORKSPACE/snapshots"
           for d in */; do
             d=${d%/}
-            key=$(python -c "import json;print(json.load(open('$d/meta.json'))['state_key'])")
-            terraform -chdir="$d" init -input=false \
-              -backend-config="resource_group_name=${{ vars.TFSTATE_RESOURCE_GROUP }}" \
-              -backend-config="storage_account_name=${{ vars.TFSTATE_STORAGE_ACCOUNT }}" \
-              -backend-config="container_name=${{ vars.TFSTATE_CONTAINER }}" \
-              -backend-config="key=$key" -backend-config="use_azuread_auth=true"
+            terraform -chdir="$d" init -input=false     # local backend: state is the temporary terraform.tfstate in $d
             snap="$GITHUB_WORKSPACE/snapshots/${{ inputs.manifest }}-${{ inputs.target }}-$d"
             terraform -chdir="$d" state pull > "$snap.before.json"
             terraform -chdir="$d" apply -input=false -lock-timeout=5m tfplan     # exactly the reviewed plan

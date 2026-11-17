@@ -49,7 +49,6 @@ on:
 
 permissions:
   contents: read
-  id-token: write        # OIDC to the Terraform state backend (no stored cloud credentials)
   pull-requests: write
 
 env:
@@ -282,7 +281,7 @@ jobs:
   # Prod jobs deploy only to GitHub Environments with required reviewers (CPT + EA + API Owner +
   # Security as applicable, Section 6.2). Mocks never reach here: plan_matrix excludes them (D-03).
   deploy-prod-internal:
-    permissions: { contents: write, id-token: write, pull-requests: write }   # contents: write tags the deployed revision
+    permissions: { contents: write, pull-requests: write }   # contents: write tags the deployed revision
     needs: [prepare, build, deploy-uat]
     if: >-
       !cancelled() && needs.build.result == 'success' && needs.prepare.outputs.prod_internal != '[]' &&
@@ -305,7 +304,7 @@ jobs:
 
   # Default order for 'both' APIs: prod-internal first, then prod-external (T2, D-15).
   deploy-prod-external:
-    permissions: { contents: write, id-token: write, pull-requests: write }   # contents: write tags the deployed revision
+    permissions: { contents: write, pull-requests: write }   # contents: write tags the deployed revision
     needs: [prepare, build, deploy-uat, deploy-prod-internal]
     if: >-
       !cancelled() && needs.build.result == 'success' && needs.prepare.outputs.prod_external != '[]' &&

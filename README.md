@@ -102,8 +102,7 @@ match. Only target-specific values vary between environments (Principle 4).
    credentials without reviewers so approvers can read the plan first.
 2. **Per environment** - secrets: `KONNECT_SPAT` (system account scoped to that control plane only, C18),
    `TEST_CLIENT_ID`, `TEST_CLIENT_SECRET`, `TEST_SCOPE`, optional `WRONG_ISSUER_TOKEN`, `LOW_SCOPE_TOKEN`.
-   Variables: `KONNECT_CONTROL_PLANE_ID`, `TFSTATE_RESOURCE_GROUP`, `TFSTATE_STORAGE_ACCOUNT`,
-   `TFSTATE_CONTAINER`, `ARM_CLIENT_ID`, `ARM_TENANT_ID`, `ARM_SUBSCRIPTION_ID` (state via Azure OIDC, no stored keys).
+   Variables: `KONNECT_CONTROL_PLANE_ID`.
 3. Fill in `environments/*.yaml` (issuers, hostnames, regional data-plane addresses, global plugins).
 4. Add CODEOWNERS: `policy/ea-approvals.yaml` -> EA, `policy/ownership-registry.yaml` and
    `policy/plugin-allowlist.yaml` -> CPT, `environments/` -> CPT.
@@ -121,7 +120,7 @@ match. Only target-specific values vary between environments (Principle 4).
 ## Assumptions and items to confirm
 
 - **Samples:** the contract, manifest, hostnames, tenants, and the entry in `ea-approvals.yaml` are placeholders.
-- **Backend state:** Azure Storage (`azurerm`), following the suggestion already in `kong-ai-mcp-apiops/terraform/envs/dev/backend.tf`. Swap the `backend` block in `oas2tf.py` and the `-backend-config` flags if Williams picks another.
+- **Backend state:** temporary. The generated config uses the Terraform `local` backend; `terraform.tfstate` is passed from the plan job to the apply job inside the artifact and is not kept after the run. The Azure Storage (`azurerm`) backend is disabled until a tenant ID exists; to restore it, switch the `backend` block in `oas2tf.py` back to `azurerm`, re-add the `-backend-config` flags and `ARM_*` variables in `deploy-target.yaml`, and add `id-token: write`.
 - **Verified locally:** generated config passes `terraform validate` against the real `kong/konnect` provider schema, and the policy gates, plan guard, and generator were exercised for mock, live, `both`, and branch cases. The workflows themselves were not run (they need your Konnect org and GitHub Environments), and `actionlint` was not available.
 - **Mocking plugin** matching on a prefixed path should be confirmed in dev (Task 6A.3); the generator re-prefixes the spec paths to match the gateway path.
 - **`scopes_required`:** when an operation lists several alternative security requirements, scopes are merged. Confirm the plugin's match semantics against D-08/D-23 before relying on OR behaviour.
