@@ -1,0 +1,13 @@
+
+plugins:
+  - openid-connect
+  - oas-validation
+  - response-transformer
+  - request-transformer
+  - response-transformer-advanced
+  - request-transformer-advanced
+  - rate-limiting-advanced
+  - correlation-id
+  - opentelemetry
+  - mocking
+  - cors

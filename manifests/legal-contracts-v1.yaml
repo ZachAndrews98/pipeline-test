@@ -1,0 +1,33 @@
+# Deployment manifest (Task 4.2). One file per API major version.
+api: contracts                 # path segment: /contracts/v1/...
+domain: legal                  # Service name: legal-contracts-v1-int
+major: 1
+semver: 1.0.0-alpha.1          # must equal info.version in the OAS
+exposure: internal             # internal (default) | external | both  (D-20)
+owner: team-legal
+lifecycle: active              # active | preview | deprecated | sunset
+spec: ../specs/contracts/openapi.yaml
+
+backend:
+  mode: mock                   # mock | live | mixed (mixed: dev/uat only)
+  # mock_operations: [getContract]   # mixed mode: operations still mocked
+
+# external_operations: [listContracts]  # optional subset for the external variant (D-15)
+
+# Required whenever the contract differs from the last prod-deployed one (C6, Section 6)
+# compatibility:
+#   determined_by: jane.doe
+#   determination: compatible        # compatible | breaking
+#   date: 2026-11-03
+
+# Target-specific values only (Principle 4). Everything else is shared.
+targets:
+  dev:
+    audience: { int: "api://contracts-int-dev" }
+    upstream: { protocol: https, host: contracts.dev.internal.example.com, port: 443, path: /api }
+  uat:
+    audience: { int: "api://contracts-int-uat" }
+    upstream: { protocol: https, host: contracts.uat.internal.example.com, port: 443, path: /api }
+  prod-internal:
+    audience: { int: "api://contracts-int" }
+    upstream: { protocol: https, host: contracts.internal.example.com, port: 443, path: /api }

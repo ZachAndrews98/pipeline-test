@@ -1,0 +1,204 @@
+# Reusable: plan -> (approval) -> apply -> verify for ONE manifest on ONE control plane.
+# Called by oas-to-konnect.yaml. Never edit config here: it only applies the artifact the
+# build job generated and gated (Principle 4).
+#
+# GitHub Environments (create one per target; Layer 1 / C18):
+#   dev, uat                      secrets/vars for that control plane, no reviewers
+#   prod-internal-plan            same prod-internal credentials, NO reviewers (lets reviewers see the plan)
+#   prod-internal                 REQUIRED REVIEWERS (CPT + EA + API Owner + Security) - gates apply
+#   prod-external-plan, prod-external   same pattern
+# Per-environment secrets:  KONNECT_SPAT (system account scoped to that control plane ONLY),
+#                           TEST_CLIENT_ID, TEST_CLIENT_SECRET, TEST_SCOPE,
+#                           WRONG_ISSUER_TOKEN, LOW_SCOPE_TOKEN (optional)
+# Per-environment variables: KONNECT_CONTROL_PLANE_ID, TFSTATE_RESOURCE_GROUP, TFSTATE_STORAGE_ACCOUNT,
+#                           TFSTATE_CONTAINER, ARM_CLIENT_ID, ARM_TENANT_ID, ARM_SUBSCRIPTION_ID
+name: deploy-target
+
+on:
+  workflow_call:
+    inputs:
+      manifest:        { type: string,  required: true }
+      target:          { type: string,  required: true }
+      mode:            { type: string,  required: true, description: "plan | apply | destroy" }
+      ref:             { type: string,  required: true }
+      config_revision: { type: string,  required: true }
+      branch:          { type: string,  default: "" }
+      rollback:        { type: boolean, default: false }
+      rate_limit_test: { type: boolean, default: false }
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    env:    # job-level so environment-scoped secrets/vars resolve
+      ARM_USE_OIDC: "true"
+      ARM_CLIENT_ID: ${{ vars.ARM_CLIENT_ID }}
+      ARM_TENANT_ID: ${{ vars.ARM_TENANT_ID }}
+      ARM_SUBSCRIPTION_ID: ${{ vars.ARM_SUBSCRIPTION_ID }}
+      KONNECT_SPAT: ${{ secrets.KONNECT_SPAT }}
+      TF_VAR_control_plane_id: ${{ vars.KONNECT_CONTROL_PLANE_ID }}
+      TF_IN_AUTOMATION: "1"
+    environment: ${{ startsWith(inputs.target, 'prod') && format('{0}-plan', inputs.target) || inputs.target }}
+    concurrency:
+      group: konnect-${{ inputs.target }}-${{ inputs.manifest }}-${{ inputs.branch }}
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+        with: { ref: "${{ inputs.ref }}" }
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - uses: hashicorp/setup-terraform@v3
+        with: { terraform_wrapper: false }
+      - uses: actions/download-artifact@v4
+        with:
+          name: config-${{ inputs.manifest }}
+          path: Pipeline/build
+
+      - name: Plan each variant (scoped state per API / target / variant, C1)
+        working-directory: Pipeline/build/${{ inputs.target }}
+        run: |
+          set -e
+          pip install -q pyyaml
+          eval "$(cd ../../scripts && python - <<'PY'
+          from common import load_manifest
+          m = load_manifest('../manifests/${{ inputs.manifest }}.yaml')
+          print(f"API={m['api']}; MAJOR={m['major']}")
+          PY
+          )"
+          DESTROY=""; [ "${{ inputs.mode }}" = "destroy" ] && DESTROY="-destroy"
+          for d in */; do
+            d=${d%/}
+            key=$(python -c "import json;print(json.load(open('$d/meta.json'))['state_key'])")
+            echo "::group::terraform plan $d ($key)"
+            terraform -chdir="$d" init -input=false \
+              -backend-config="resource_group_name=${{ vars.TFSTATE_RESOURCE_GROUP }}" \
+              -backend-config="storage_account_name=${{ vars.TFSTATE_STORAGE_ACCOUNT }}" \
+              -backend-config="container_name=${{ vars.TFSTATE_CONTAINER }}" \
+              -backend-config="key=$key" -backend-config="use_azuread_auth=true"
+            terraform -chdir="$d" plan -input=false -lock-timeout=5m $DESTROY -out=tfplan
+            terraform -chdir="$d" show -json tfplan > "$d/plan.json"
+            # C1: refuse any change to entities outside this API's tags
+            python ../../scripts/plan_guard.py "$d/plan.json" --api "$API" --major "$MAJOR" --summary "$d/summary.md"
+            {
+              echo "### Plan: \`${{ inputs.manifest }}\` -> \`${{ inputs.target }}/$d\` (revision \`${{ inputs.config_revision }}\`)"
+              cat "$d/summary.md"
+              echo; echo '<details><summary>Full plan</summary>'; echo; echo '```'
+              terraform -chdir="$d" show -no-color tfplan | head -c 60000
+              echo '```'; echo '</details>'
+            } >> "$GITHUB_STEP_SUMMARY"      # C3: reviewable output; prod reviewers read it before approving
+            echo "::endgroup::"
+          done
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tfplan-${{ inputs.manifest }}-${{ inputs.target }}-${{ inputs.config_revision }}
+          # keep the lock file so apply uses the exact provider version that produced the plan
+          include-hidden-files: true
+          path: |
+            Pipeline/build/${{ inputs.target }}
+            !Pipeline/build/${{ inputs.target }}/**/.terraform/**
+          retention-days: 7
+
+  apply:
+    needs: plan
+    if: inputs.mode == 'apply' || inputs.mode == 'destroy'
+    runs-on: ubuntu-latest
+    env:    # job-level so environment-scoped secrets/vars resolve
+      ARM_USE_OIDC: "true"
+      ARM_CLIENT_ID: ${{ vars.ARM_CLIENT_ID }}
+      ARM_TENANT_ID: ${{ vars.ARM_TENANT_ID }}
+      ARM_SUBSCRIPTION_ID: ${{ vars.ARM_SUBSCRIPTION_ID }}
+      KONNECT_SPAT: ${{ secrets.KONNECT_SPAT }}
+      TF_VAR_control_plane_id: ${{ vars.KONNECT_CONTROL_PLANE_ID }}
+      TF_IN_AUTOMATION: "1"
+    environment: ${{ inputs.target }}        # prod-* environments carry the required reviewers
+    concurrency:
+      group: konnect-${{ inputs.target }}-${{ inputs.manifest }}-${{ inputs.branch }}-apply
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+        with: { ref: "${{ inputs.ref }}", fetch-depth: 0 }
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - uses: hashicorp/setup-terraform@v3
+        with: { terraform_wrapper: false }
+      - uses: actions/download-artifact@v4
+        with:
+          name: tfplan-${{ inputs.manifest }}-${{ inputs.target }}-${{ inputs.config_revision }}
+          path: Pipeline/build/${{ inputs.target }}
+
+      - name: Apply the reviewed plan with before/after snapshots (Task 4.15)
+        working-directory: Pipeline/build/${{ inputs.target }}
+        run: |
+          set -e
+          pip install -q pyyaml
+          mkdir -p "$GITHUB_WORKSPACE/snapshots"
+          for d in */; do
+            d=${d%/}
+            key=$(python -c "import json;print(json.load(open('$d/meta.json'))['state_key'])")
+            terraform -chdir="$d" init -input=false \
+              -backend-config="resource_group_name=${{ vars.TFSTATE_RESOURCE_GROUP }}" \
+              -backend-config="storage_account_name=${{ vars.TFSTATE_STORAGE_ACCOUNT }}" \
+              -backend-config="container_name=${{ vars.TFSTATE_CONTAINER }}" \
+              -backend-config="key=$key" -backend-config="use_azuread_auth=true"
+            snap="$GITHUB_WORKSPACE/snapshots/${{ inputs.manifest }}-${{ inputs.target }}-$d"
+            terraform -chdir="$d" state pull > "$snap.before.json"
+            terraform -chdir="$d" apply -input=false -lock-timeout=5m tfplan     # exactly the reviewed plan
+            terraform -chdir="$d" state pull > "$snap.after.json"
+            cp "$d/plan.json" "$snap.plan.json"
+            echo "{\"manifest\":\"${{ inputs.manifest }}\",\"target\":\"${{ inputs.target }}\",\"variant\":\"$d\",\"config_revision\":\"${{ inputs.config_revision }}\",\"git_sha\":\"$GITHUB_SHA\",\"ref\":\"${{ inputs.ref }}\",\"actor\":\"$GITHUB_ACTOR\",\"run\":\"$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID\",\"rollback\":${{ inputs.rollback }}}" > "$snap.record.json"
+          done
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: snapshots-${{ inputs.manifest }}-${{ inputs.target }}-${{ inputs.config_revision }}
+          path: snapshots
+          retention-days: 90
+
+      # Verification: a deployment is complete only when BOTH regions are verified (T3, C17).
+      - name: Contract + smoke tests against each regional data plane
+        if: inputs.mode == 'apply'
+        working-directory: Pipeline/scripts
+        env:
+          TEST_CLIENT_ID: ${{ secrets.TEST_CLIENT_ID }}
+          TEST_CLIENT_SECRET: ${{ secrets.TEST_CLIENT_SECRET }}
+          TEST_SCOPE: ${{ secrets.TEST_SCOPE }}
+          WRONG_ISSUER_TOKEN: ${{ secrets.WRONG_ISSUER_TOKEN }}
+          LOW_SCOPE_TOKEN: ${{ secrets.LOW_SCOPE_TOKEN }}
+        run: |
+          pip install -q pyyaml
+          args=(--manifest ../manifests/${{ inputs.manifest }}.yaml --target ${{ inputs.target }}
+                --config-revision "${{ inputs.config_revision }}" --out "$GITHUB_WORKSPACE/smoke-results.json")
+          [ "${{ inputs.rate_limit_test }}" = "true" ] && args+=(--rate-limit)
+          if [ -n "${{ inputs.branch }}" ]; then
+            slug=$(python -c "from common import branch_slug; print(branch_slug('${{ inputs.branch }}'))")
+            args+=(--branch-prefix "/branch-$slug")
+          fi
+          python smoke_test.py "${args[@]}"
+
+      - uses: actions/upload-artifact@v4
+        if: always() && inputs.mode == 'apply'
+        with:
+          name: smoke-${{ inputs.manifest }}-${{ inputs.target }}-${{ inputs.config_revision }}
+          path: smoke-results.json
+          if-no-files-found: ignore
+
+      # Only after both regions verify: record this revision as the last prod-deployed contract.
+      # The next run's change classification (5.11) and rollbacks (Task 10.1) use this tag.
+      - name: Tag verified production revision
+        if: inputs.mode == 'apply' && startsWith(inputs.target, 'prod') && inputs.branch == ''
+        working-directory: Pipeline/scripts
+        run: |
+          eval "$(python - <<'PY'
+          from common import load_manifest
+          m = load_manifest('../manifests/${{ inputs.manifest }}.yaml')
+          print(f"API={m['api']}; MAJOR={m['major']}")
+          PY
+          )"
+          git config user.name "oas-to-konnect"; git config user.email "noreply@users.noreply.github.com"
+          git tag -f "deployed/${{ inputs.target }}/$API-v$MAJOR" "${{ inputs.ref }}"
+          git push -f origin "refs/tags/deployed/${{ inputs.target }}/$API-v$MAJOR"

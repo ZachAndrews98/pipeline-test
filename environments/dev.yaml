@@ -1,0 +1,32 @@
+# Platform parameters for the 'dev' control plane. Applies to every API.
+target: dev
+konnect:
+  server_url: https://us.api.konghq.com   # set to your Konnect geo
+  control_plane_name: cp-dev                 # ID is supplied via the GitHub environment variable KONNECT_CONTROL_PLANE_ID
+identity:               # exactly one issuer per variant (D-21a)
+  int:
+    type: entra_id
+    issuer: https://login.microsoftonline.com/00000000-0000-0000-0000-n00000000000/v2.0
+  ext:
+    type: entra_external_id
+    issuer: https://exampleextnonprod.ciamlogin.com/11111111-1111-1111-1111-111111111111/v2.0
+hostnames:
+  int: api-int.dev.example.com
+  ext: api.dev.example.com
+rate_limit:             # D-17 (counter scope) is open: document the effective limit
+  minute: 600
+  policy: local
+correlation_id:
+  header_name: X-Correlation-ID
+logging:
+  http_endpoint: https://logs.dev.example.com/kong
+# Plugins already enforced globally on this control plane (Phase 3.2). Used by the
+# policy check to compute the effective required-plugin set.
+global_plugins: [opentelemetry, correlation-id]
+# Regional data planes for smoke tests (Task 2.7): real hostname/SNI, regional address.
+regions:
+  - { name: region-a, address: dp-a.dev.example.com }
+  - { name: region-b, address: dp-b.dev.example.com }
+smoke:
+  token_url: https://login.microsoftonline.com/TENANT/oauth2/v2.0/token
+  rate_limit_probe: 650

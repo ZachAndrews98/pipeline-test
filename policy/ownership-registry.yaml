@@ -1,0 +1,3 @@
+# Path/hostname reservation registry (Layer 4, Task 3.7). CPT owns this file.
+apis:
+  - { api: contracts, major: 1, owner: team-legal, path_prefix: /contracts/v1 }

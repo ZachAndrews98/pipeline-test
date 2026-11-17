@@ -1,0 +1,335 @@
+# oas-to-konnect: converts an approved OAS contract into Konnect API gateway Terraform
+# resources and promotes the SAME generated artifact dev -> uat -> prod-internal -> prod-external.
+#
+# Task coverage (Konnect Dedicated Cloud Gateway Setup Tasks, Phase 4 + Phase 5 gates):
+#   4.1 spec in VCS       4.2 manifest        4.3 generator (scripts/oas2tf.py)
+#   4.4-4.9 naming/routes/tags/OIDC/validator/headers (generator)   4.10 baseline plugins
+#   4.11 parameterized targets (environments/*.yaml + manifest.targets)
+#   4.12 ordered apply (Terraform dependency graph)  4.13 scoped apply (state per API/target/variant + plan guard)
+#   4.14 plan preview in the job summary             4.15 before/after state snapshots
+#   4.16 config revision = git SHA, tagged on every entity and returned in X-Config-Revision
+#   5.1-5.11 policy gates (scripts/policy_check.py)
+#
+# INSTALL: GitHub only reads workflows from <repo root>/.github/workflows. Copy (or symlink)
+# both files in Pipeline/.github/workflows/ there. All paths below assume Pipeline/ is at the repo root.
+name: oas-to-konnect
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, closed]
+    paths: ["Pipeline/**"]
+  push:
+    branches: [main]
+    paths: ["Pipeline/**"]
+  workflow_dispatch:
+    inputs:
+      manifest:
+        description: "Manifest name (file stem in Pipeline/manifests) or 'all'"
+        default: all
+      target:
+        description: "'promotion' runs dev -> uat -> prod in order; or pick a single target"
+        type: choice
+        default: promotion
+        options: [promotion, dev, uat, prod-internal, prod-external]
+      mode:
+        description: "plan = preview only; apply = deploy"
+        type: choice
+        default: plan
+        options: [plan, apply]
+      ref:
+        description: "Git ref to deploy (set to a last-known-good ref to roll back, Task 10.1)"
+        default: ""
+      rollback:
+        description: "Rollback: skip change classification (restoring an approved state)"
+        type: boolean
+        default: false
+      branch_deploy:
+        description: "Deploy the selected branch to Dev only, on branch-named paths (D-18)"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  id-token: write        # OIDC to the Terraform state backend (no stored cloud credentials)
+  pull-requests: write
+
+env:
+  OASDIFF_VERSION: v1.35.0
+
+jobs:
+  # --------------------------------------------------------------------------
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      manifests: ${{ steps.m.outputs.manifests }}
+      dev: ${{ steps.m.outputs.dev }}
+      uat: ${{ steps.m.outputs.uat }}
+      prod_internal: ${{ steps.m.outputs.prod_internal }}
+      prod_external: ${{ steps.m.outputs.prod_external }}
+      revision: ${{ steps.rev.outputs.revision }}
+      branch: ${{ steps.br.outputs.branch }}
+      mode: ${{ steps.mode.outputs.mode }}
+      ref: ${{ steps.mode.outputs.ref }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ (github.event_name == 'pull_request' && github.event.action == 'closed') && github.event.pull_request.head.sha || (inputs.ref || github.sha) }}
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - run: pip install -r Pipeline/requirements.txt
+      - id: mode
+        name: Resolve mode
+        run: |
+          case "${{ github.event_name }}" in
+            push)              mode=apply ;;
+            workflow_dispatch) mode="${{ inputs.mode }}" ;;
+            *)                 mode=plan ;;   # PRs preview only
+          esac
+          [ "${{ github.event_name }}" = "pull_request" ] && [ "${{ github.event.action }}" = "closed" ] && mode=destroy
+          echo "mode=$mode" >> "$GITHUB_OUTPUT"
+          echo "ref=${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || (inputs.ref || github.sha) }}" >> "$GITHUB_OUTPUT"
+      - id: br
+        name: Resolve development branch (D-18)
+        run: |
+          b=""
+          if [ "${{ inputs.branch_deploy }}" = "true" ]; then b="${{ github.ref_name }}"; fi
+          if [ "${{ github.event_name }}" = "pull_request" ] && [ "${{ github.event.action }}" = "closed" ]; then
+            b="${{ github.head_ref }}"            # PR close removes that branch's Dev overlay
+          fi
+          echo "branch=$b" >> "$GITHUB_OUTPUT"
+      - id: rev
+        name: Configuration revision (Task 4.16, distinct from API semver)
+        run: echo "revision=$(git rev-parse --short=12 HEAD)" >> "$GITHUB_OUTPUT"
+      - id: m
+        name: Select manifests and targets
+        run: |
+          base="${{ github.event.pull_request.base.sha || github.event.before }}"
+          if [ -n "$base" ] && git cat-file -e "$base" 2>/dev/null; then
+            git diff --name-only "$base" HEAD > "$RUNNER_TEMP/changed.txt"
+          else : > "$RUNNER_TEMP/changed.txt"; fi
+          python Pipeline/scripts/plan_matrix.py \
+            --changed-files "$RUNNER_TEMP/changed.txt" \
+            --manifest "${{ inputs.manifest }}"
+
+  # --------------------------------------------------------------------------
+  # Lint + generate + policy gates. Runs once per manifest; the resulting artifact is what every
+  # environment applies (Principle 4: promote artifacts, don't re-author them).
+  build:
+    needs: prepare
+    if: needs.prepare.outputs.manifests != '[]'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        manifest: ${{ fromJSON(needs.prepare.outputs.manifests) }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ needs.prepare.outputs.ref }}
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - run: pip install -r Pipeline/requirements.txt
+      - uses: actions/setup-node@v4
+        with: { node-version: "20" }
+      - uses: hashicorp/setup-terraform@v3
+        with: { terraform_wrapper: false }
+
+      - name: Install oasdiff
+        run: |
+          curl -fsSL "https://github.com/oasdiff/oasdiff/releases/download/${OASDIFF_VERSION}/oasdiff_${OASDIFF_VERSION#v}_linux_amd64.tar.gz" \
+            | tar -xz -C /usr/local/bin oasdiff
+
+      - name: Lint OAS (Spectral)
+        working-directory: Pipeline/scripts
+        run: |
+          spec=$(python -c "from common import load_manifest; print(load_manifest('../manifests/${{ matrix.manifest }}.yaml')['_spec_path'])")
+          npx --yes @stoplight/spectral-cli@6 lint "$spec" --ruleset ../policy/oas-ruleset.yaml --fail-severity=error
+
+      - name: Resolve targets
+        id: t
+        working-directory: Pipeline/scripts
+        run: |
+          sel="${{ github.event_name == 'workflow_dispatch' && inputs.target || 'promotion' }}"
+          if [ "${{ needs.prepare.outputs.branch }}" != "" ]; then t=dev
+          elif [ "$sel" = "promotion" ]; then t=$(python manifest_targets.py ../manifests/${{ matrix.manifest }}.yaml)
+          else t="$sel"; fi
+          echo "targets=$t" >> "$GITHUB_OUTPUT"
+
+      - name: Fetch last prod-deployed contract and classify the change (5.11, C6)
+        id: cls
+        working-directory: Pipeline/scripts
+        run: |
+          set -e
+          eval "$(python - <<'PY'
+          from common import load_manifest
+          m = load_manifest('../manifests/${{ matrix.manifest }}.yaml')
+          print(f"API={m['api']}; MAJOR={m['major']}; SPEC={m['_spec_path']}")
+          PY
+          )"
+          tag=""
+          for t in prod-internal prod-external; do
+            git rev-parse -q --verify "refs/tags/deployed/$t/$API-v$MAJOR" >/dev/null && { tag="deployed/$t/$API-v$MAJOR"; break; }
+          done
+          if [ -z "$tag" ]; then echo "No prod-deployed revision of $API v$MAJOR: first deployment."; exit 0; fi
+          rel=$(realpath --relative-to="$(git rev-parse --show-toplevel)" "$SPEC")
+          prev="$RUNNER_TEMP/prev"; mkdir -p "$prev"
+          # restore the previous contract and every file next to it (referenced schemas)
+          git archive "$tag" "$(dirname "$rel")" | tar -x -C "$prev"
+          prevspec="$prev/$rel"
+          oasdiff breaking  "$prevspec" "$SPEC" --format json > "$RUNNER_TEMP/breaking.json"  || true
+          oasdiff changelog "$prevspec" "$SPEC" --format json > "$RUNNER_TEMP/changes.json"   || true
+          echo "prev=$prevspec" >> "$GITHUB_OUTPUT"
+          oasdiff changelog "$prevspec" "$SPEC" --format text >> "$GITHUB_STEP_SUMMARY" || true
+
+      - name: Generate Terraform and run policy gates per target
+        working-directory: Pipeline/scripts
+        run: |
+          set -e
+          M=../manifests/${{ matrix.manifest }}.yaml
+          B="${{ needs.prepare.outputs.branch }}"
+          for t in ${{ steps.t.outputs.targets }}; do
+            echo "::group::$t"
+            args=(--manifest "$M" --target "$t")
+            [ -n "$B" ] && args+=(--branch "$B")
+            if [ "${{ needs.prepare.outputs.mode }}" != "destroy" ]; then
+              extra=()
+              [ -n "${{ steps.cls.outputs.prev }}" ] && extra+=(--prev-spec "${{ steps.cls.outputs.prev }}" \
+                 --oasdiff-breaking "$RUNNER_TEMP/breaking.json" --oasdiff-changes "$RUNNER_TEMP/changes.json")
+              [ "${{ inputs.rollback }}" = "true" ] && extra+=(--rollback)
+              python policy_check.py "${args[@]}" "${extra[@]}"          # pre-generation gates
+            fi
+            # 5.7 is enforced above; the generator refuses targets with no variant as well
+            python oas2tf.py "${args[@]}" --out ../build --config-revision "${{ needs.prepare.outputs.revision }}"
+            if [ "${{ needs.prepare.outputs.mode }}" != "destroy" ]; then
+              python policy_check.py "${args[@]}" "${extra[@]}" --generated ../build   # post-generation gates
+            fi
+            echo "::endgroup::"
+          done
+
+      - name: Validate generated roots against the Konnect provider schema
+        working-directory: Pipeline/build
+        run: |
+          if [ "${{ needs.prepare.outputs.mode }}" = "destroy" ]; then exit 0; fi
+          for d in */*/; do
+            echo "== $d"
+            terraform -chdir="$d" init -backend=false -input=false >/dev/null
+            terraform -chdir="$d" validate -no-color
+          done
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: config-${{ matrix.manifest }}
+          path: Pipeline/build
+          retention-days: 30      # the promotable artifact; also the rollback evidence
+
+  # --------------------------------------------------------------------------
+  # Deployment chain. Each job calls the reusable workflow once per manifest.
+  deploy-dev:
+    needs: [prepare, build]
+    if: >-
+      !cancelled() && needs.build.result == 'success' && needs.prepare.outputs.dev != '[]' &&
+      needs.prepare.outputs.mode != 'destroy' &&
+      (github.event_name != 'workflow_dispatch' || inputs.target == 'promotion' || inputs.target == 'dev')
+    strategy:
+      fail-fast: false
+      matrix:
+        manifest: ${{ fromJSON(needs.prepare.outputs.dev) }}
+    uses: ./.github/workflows/deploy-target.yaml
+    with:
+      manifest: ${{ matrix.manifest }}
+      target: dev
+      mode: ${{ needs.prepare.outputs.mode }}
+      ref: ${{ needs.prepare.outputs.ref }}
+      config_revision: ${{ needs.prepare.outputs.revision }}
+      branch: ${{ needs.prepare.outputs.branch }}
+      rate_limit_test: true
+    secrets: inherit
+
+  deploy-uat:
+    needs: [prepare, build, deploy-dev]
+    if: >-
+      !cancelled() && needs.build.result == 'success' && needs.prepare.outputs.uat != '[]' &&
+      needs.prepare.outputs.mode == 'apply' && needs.prepare.outputs.branch == '' &&
+      (needs.deploy-dev.result == 'success' || needs.deploy-dev.result == 'skipped') &&
+      (github.event_name != 'workflow_dispatch' || inputs.target == 'promotion' || inputs.target == 'uat')
+    strategy:
+      fail-fast: false
+      matrix:
+        manifest: ${{ fromJSON(needs.prepare.outputs.uat) }}
+    uses: ./.github/workflows/deploy-target.yaml
+    with:
+      manifest: ${{ matrix.manifest }}
+      target: uat
+      mode: apply
+      ref: ${{ needs.prepare.outputs.ref }}
+      config_revision: ${{ needs.prepare.outputs.revision }}
+      rate_limit_test: true
+    secrets: inherit
+
+  # Prod jobs deploy only to GitHub Environments with required reviewers (CPT + EA + API Owner +
+  # Security as applicable, Section 6.2). Mocks never reach here: plan_matrix excludes them (D-03).
+  deploy-prod-internal:
+    permissions: { contents: write, id-token: write, pull-requests: write }   # contents: write tags the deployed revision
+    needs: [prepare, build, deploy-uat]
+    if: >-
+      !cancelled() && needs.build.result == 'success' && needs.prepare.outputs.prod_internal != '[]' &&
+      needs.prepare.outputs.mode == 'apply' && needs.prepare.outputs.branch == '' &&
+      (needs.deploy-uat.result == 'success' || needs.deploy-uat.result == 'skipped') &&
+      (github.event_name != 'workflow_dispatch' || inputs.target == 'promotion' || inputs.target == 'prod-internal')
+    strategy:
+      fail-fast: false
+      matrix:
+        manifest: ${{ fromJSON(needs.prepare.outputs.prod_internal) }}
+    uses: ./.github/workflows/deploy-target.yaml
+    with:
+      manifest: ${{ matrix.manifest }}
+      target: prod-internal
+      mode: apply
+      ref: ${{ needs.prepare.outputs.ref }}
+      config_revision: ${{ needs.prepare.outputs.revision }}
+      rollback: ${{ inputs.rollback == true }}
+    secrets: inherit
+
+  # Default order for 'both' APIs: prod-internal first, then prod-external (T2, D-15).
+  deploy-prod-external:
+    permissions: { contents: write, id-token: write, pull-requests: write }   # contents: write tags the deployed revision
+    needs: [prepare, build, deploy-uat, deploy-prod-internal]
+    if: >-
+      !cancelled() && needs.build.result == 'success' && needs.prepare.outputs.prod_external != '[]' &&
+      needs.prepare.outputs.mode == 'apply' && needs.prepare.outputs.branch == '' &&
+      (needs.deploy-uat.result == 'success' || needs.deploy-uat.result == 'skipped') &&
+      (needs.deploy-prod-internal.result == 'success' || needs.deploy-prod-internal.result == 'skipped') &&
+      (github.event_name != 'workflow_dispatch' || inputs.target == 'promotion' || inputs.target == 'prod-external')
+    strategy:
+      fail-fast: false
+      matrix:
+        manifest: ${{ fromJSON(needs.prepare.outputs.prod_external) }}
+    uses: ./.github/workflows/deploy-target.yaml
+    with:
+      manifest: ${{ matrix.manifest }}
+      target: prod-external
+      mode: apply
+      ref: ${{ needs.prepare.outputs.ref }}
+      config_revision: ${{ needs.prepare.outputs.revision }}
+      rollback: ${{ inputs.rollback == true }}
+    secrets: inherit
+
+  # Closing a PR removes that branch's Dev entities only (scoped cleanup, C20)
+  cleanup-branch:
+    needs: [prepare, build]
+    if: needs.prepare.outputs.mode == 'destroy' && needs.prepare.outputs.branch != '' && needs.build.result == 'success'
+    strategy:
+      fail-fast: false
+      matrix:
+        manifest: ${{ fromJSON(needs.prepare.outputs.dev) }}
+    uses: ./.github/workflows/deploy-target.yaml
+    with:
+      manifest: ${{ matrix.manifest }}
+      target: dev
+      mode: destroy
+      ref: ${{ needs.prepare.outputs.ref }}
+      config_revision: ${{ needs.prepare.outputs.revision }}
+      branch: ${{ needs.prepare.outputs.branch }}
+    secrets: inherit

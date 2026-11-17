@@ -1,0 +1,97 @@
+openapi: 3.0.3
+info:
+  title: Contracts API
+  version: 1.0.0-alpha.1
+  description: Example contract used to exercise the OAS-to-Konnect pipeline.
+servers:
+  - url: https://api-int.example.com/contracts/v1
+security:
+  - oauth: []
+paths:
+  /contracts:
+    get:
+      operationId: listContracts
+      summary: List contracts
+      security:
+        - oauth: [contracts.read]
+      parameters:
+        - name: status
+          in: query
+          required: false
+          schema: { type: string, enum: [draft, active, expired] }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "schemas/contract.json" }
+              example:
+                - { id: "c-1001", title: "Master Services Agreement", status: active }
+    post:
+      operationId: createContract
+      summary: Create a contract
+      security:
+        - oauth: [contracts.write]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ContractInput" }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: "schemas/contract.json" }
+              example: { id: "c-1002", title: "NDA", status: draft }
+  /contracts/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string, pattern: "^c-[0-9]+$" }
+    get:
+      operationId: getContract
+      summary: Get one contract
+      security:
+        - oauth: [contracts.read]
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "schemas/contract.json" }
+              example: { id: "c-1001", title: "Master Services Agreement", status: active }
+        "404":
+          description: Not found
+    delete:
+      operationId: deleteContract
+      summary: Delete a contract
+      security:
+        - oauth: [contracts.write]
+      x-required-roles: [Contracts.Admin]
+      responses:
+        "204":
+          description: Deleted
+          content:
+            application/json:
+              example: {}
+components:
+  securitySchemes:
+    oauth:
+      type: oauth2
+      flows:
+        clientCredentials:
+          tokenUrl: https://login.microsoftonline.com/TENANT/oauth2/v2.0/token
+          scopes:
+            contracts.read: Read contracts
+            contracts.write: Create and delete contracts
+  schemas:
+    ContractInput:
+      type: object
+      required: [title]
+      properties:
+        title: { type: string, minLength: 1, maxLength: 200 }
+        counterparty: { type: string, nullable: true }

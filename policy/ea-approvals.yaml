@@ -1,0 +1,10 @@
+# EA design approvals tied to exact spec + schema revisions (C19, D-24). EA owns this file
+# (protect with CODEOWNERS). Hashes come from: scripts/policy_check.py --manifest M --print-hashes
+approvals:
+  # SAMPLE entry for the example contract - replace with real EA approvals.
+  - api: contracts
+    major: 1
+    spec_sha256: 8d8ed99b7a553d9748a7c4e634cd9f24a90ce1f47d717b7fa9f5be6541c4b1c7
+    schemas_sha256: c0d1b3d6e343b4e2cf55325f858d332298805c7e27ef16c1678432c261736cc5
+    approved_by: sample-ea-reviewer
+    ticket: EA-0000
