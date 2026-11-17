@@ -13,7 +13,7 @@ paths:
       operationId: listContracts
       summary: List contracts
       security:
-        - oauth: [contracts.read]
+        - oauth: [contracts.reads]
       parameters:
         - name: status
           in: query
