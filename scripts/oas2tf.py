@@ -21,7 +21,7 @@ from common import (
 )
 
 PLACEHOLDER_UPSTREAM = {"protocol": "http", "host": "mock.invalid", "port": 80, "path": None}
-REF_RE = re.compile(r"^\$\{konnect_[a-z_]+\.[A-Za-z0-9_]+\.id\}$")
+REF_RE = re.compile(r"^\$\{(konnect_[a-z_]+\.[A-Za-z0-9_]+\.id|var\.control_plane_id)\}$")
 
 
 def tf_escape(node):
