@@ -9,36 +9,34 @@ using the rules in *Kong API Lifecycle Deployment Scenarios.md*. Tooling choice 
 ## Layout
 
 ```
-Pipeline/
-  .github/workflows/
-    oas-to-konnect.yaml     prepare -> build (lint, classify, generate, gates) -> deploy chain
-    deploy-target.yaml      reusable: plan -> approval -> apply -> snapshots -> smoke tests -> tag
-  manifests/                one deployment manifest per API major (Task 4.2)
-  specs/                    OAS contracts + referenced JSON Schemas, in VCS (Task 4.1)
-  environments/             per-control-plane platform parameters (Task 4.11)
-  policy/                   allow-list, ownership registry, EA approvals, Spectral ruleset
-  scripts/
-    oas2tf.py               generator: OAS + manifest + env -> Terraform JSON (Tasks 4.3-4.10, 4.16)
-    policy_check.py         pipeline gates 5.1-5.11
-    plan_guard.py           scoped-apply guard on the Terraform plan (4.13)
-    plan_matrix.py          which manifests deploy to which targets
-    smoke_test.py           OAS-derived contract/smoke tests per regional data plane (7.2-7.8)
+.github/workflows/
+  oas-to-konnect.yaml     prepare -> build (lint, classify, generate, gates) -> deploy chain
+  deploy-target.yaml      reusable: plan -> approval -> apply -> snapshots -> smoke tests -> tag
+manifests/                one deployment manifest per API major (Task 4.2)
+specs/                    OAS contracts + referenced JSON Schemas, in VCS (Task 4.1)
+environments/             per-control-plane platform parameters (Task 4.11)
+policy/                   allow-list, ownership registry, EA approvals, Spectral ruleset
+scripts/
+  oas2tf.py               generator: OAS + manifest + env -> Terraform JSON (Tasks 4.3-4.10, 4.16)
+  policy_check.py         pipeline gates 5.1-5.11
+  plan_guard.py           scoped-apply guard on the Terraform plan (4.13)
+  plan_matrix.py          which manifests deploy to which targets
+  smoke_test.py           OAS-derived contract/smoke tests per regional data plane (7.2-7.8)
 ```
 
-**Install:** GitHub only runs workflows from `<repo root>/.github/workflows/`. Copy both files from
-`Pipeline/.github/workflows/` there. All paths inside assume `Pipeline/` sits at the repo root.
+GitHub only runs workflows from `<repo root>/.github/workflows/`, so this repo's layout is the repo root.
 
 ## Flow
 
 ```
 PR / push to main / manual dispatch
-  prepare   pick manifests + targets, config revision = git SHA (4.16)
-  build     per manifest: Spectral lint -> oasdiff vs last prod-deployed contract -> policy gates (pre)
-            -> generate Terraform for each target -> policy gates (post) -> terraform validate
-            -> upload ONE artifact (config-<manifest>)
-  deploy-dev -> deploy-uat -> deploy-prod-internal -> deploy-prod-external
-            each: plan (summary + plan guard) -> [environment approval] -> apply exact saved plan
-                  -> before/after state snapshots -> smoke tests in BOTH regions -> tag (prod only)
+prepare   pick manifests + targets, config revision = git SHA (4.16)
+build     per manifest: Spectral lint -> oasdiff vs last prod-deployed contract -> policy gates (pre)
+          -> generate Terraform for each target -> policy gates (post) -> terraform validate
+          -> upload ONE artifact (config-<manifest>)
+deploy-dev -> deploy-uat -> deploy-prod-internal -> deploy-prod-external
+          each: plan (summary + plan guard) -> [environment approval] -> apply exact saved plan
+                -> before/after state snapshots -> smoke tests in BOTH regions -> tag (prod only)
 ```
 
 - Pull requests: build + **plan against dev** (reviewable diff, nothing applied).

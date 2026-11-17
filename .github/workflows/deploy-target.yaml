@@ -55,10 +55,10 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: config-${{ inputs.manifest }}
-          path: Pipeline/build
+          path: build
 
       - name: Plan each variant (scoped state per API / target / variant, C1)
-        working-directory: Pipeline/build/${{ inputs.target }}
+        working-directory: build/${{ inputs.target }}
         run: |
           set -e
           pip install -q pyyaml
@@ -98,8 +98,8 @@ jobs:
           # keep the lock file so apply uses the exact provider version that produced the plan
           include-hidden-files: true
           path: |
-            Pipeline/build/${{ inputs.target }}
-            !Pipeline/build/${{ inputs.target }}/**/.terraform/**
+            build/${{ inputs.target }}
+            !build/${{ inputs.target }}/**/.terraform/**
           retention-days: 7
 
   apply:
@@ -128,10 +128,10 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: tfplan-${{ inputs.manifest }}-${{ inputs.target }}-${{ inputs.config_revision }}
-          path: Pipeline/build/${{ inputs.target }}
+          path: build/${{ inputs.target }}
 
       - name: Apply the reviewed plan with before/after snapshots (Task 4.15)
-        working-directory: Pipeline/build/${{ inputs.target }}
+        working-directory: build/${{ inputs.target }}
         run: |
           set -e
           pip install -q pyyaml
@@ -162,7 +162,7 @@ jobs:
       # Verification: a deployment is complete only when BOTH regions are verified (T3, C17).
       - name: Contract + smoke tests against each regional data plane
         if: inputs.mode == 'apply'
-        working-directory: Pipeline/scripts
+        working-directory: scripts
         env:
           TEST_CLIENT_ID: ${{ secrets.TEST_CLIENT_ID }}
           TEST_CLIENT_SECRET: ${{ secrets.TEST_CLIENT_SECRET }}
@@ -191,7 +191,7 @@ jobs:
       # The next run's change classification (5.11) and rollbacks (Task 10.1) use this tag.
       - name: Tag verified production revision
         if: inputs.mode == 'apply' && startsWith(inputs.target, 'prod') && inputs.branch == ''
-        working-directory: Pipeline/scripts
+        working-directory: scripts
         run: |
           eval "$(python - <<'PY'
           from common import load_manifest

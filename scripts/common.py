@@ -6,7 +6,7 @@ import re
 
 import yaml
 
-ROOT = pathlib.Path(__file__).resolve().parent.parent  # Pipeline/
+ROOT = pathlib.Path(__file__).resolve().parent.parent  # repo root
 TARGETS = ("dev", "uat", "prod-internal", "prod-external")
 HTTP_METHODS = ("get", "put", "post", "delete", "patch", "head", "options")
 SEMVER_RE = re.compile(

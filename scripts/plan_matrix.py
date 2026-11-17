@@ -12,7 +12,7 @@ import pathlib
 
 from common import ROOT, load_manifest, targets_for_exposure
 
-PLATFORM_DIRS = ("Pipeline/environments/", "Pipeline/policy/", "Pipeline/scripts/")
+PLATFORM_DIRS = ("environments/", "policy/", "scripts/")
 
 
 def main():
@@ -30,8 +30,8 @@ def main():
     selected = []
     for p in manifests:
         m = load_manifest(p)
-        rel_m = f"Pipeline/manifests/{p.name}"
-        spec_dir = "Pipeline/" + str(m["_spec_path"].parent.relative_to(ROOT)) + "/"
+        rel_m = f"manifests/{p.name}"
+        spec_dir = str(m["_spec_path"].parent.relative_to(ROOT)) + "/"
         if a.manifest and a.manifest != "all":
             hit = p.stem == a.manifest or p.name == a.manifest
         else:
