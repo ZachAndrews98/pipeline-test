@@ -12,5 +12,3 @@ plugins:
   - opentelemetry
   - mocking
   - cors
-  - request-validator
-  - http-log

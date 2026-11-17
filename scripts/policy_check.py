@@ -16,7 +16,7 @@ import re
 import sys
 
 from common import (
-    REQUIRED_TAGS, ROOT, SEMVER_RE, TARGETS, load_env, load_manifest, load_spec,
+    REQUIRED_TAGS, ROOT, external_spec_problems, SEMVER_RE, TARGETS, load_env, load_manifest, load_spec,
     load_yaml, oidc_requirements, operations, regex_path_to_oas, service_name,
     sha256_file, target_variants, walk_strings, branch_slug,
 )
@@ -26,7 +26,7 @@ IDP_ISSUER = {  # D-21a: one provider per variant, and the right one
     "int": ("entra_id", re.compile(r"^https://(login\.microsoftonline\.com|sts\.windows\.net)/[^/]+/")),
     "ext": ("entra_external_id", re.compile(r"^https://[^/]+\.ciamlogin\.com/[^/]+/")),
 }
-LOGGING_TELEMETRY = {"http-log", "file-log", "syslog", "tcp-log", "udp-log", "opentelemetry", "prometheus"}
+LOGGING_TELEMETRY = {"file-log", "syslog", "tcp-log", "udp-log", "opentelemetry", "prometheus"}
 # openid-connect is verified per Route below, so it is not in this service/global-level set
 REQUIRED_PLUGINS = {"rate-limiting", "correlation-id"}
 SECRET_KEY = re.compile(r"(secret|password|passwd|api[_-]?key|private[_-]?key|credentials?)$|^(access_|refresh_|bearer_)?token$", re.I)
@@ -46,6 +46,9 @@ def pre_checks(m, spec, files, target, env, a, fail):
     for k in ("api", "domain", "major", "semver", "exposure", "owner", "lifecycle", "spec", "backend"):
         if k not in m:
             fail("manifest", f"missing field '{k}'")
+    if m.get("_spec_external"):
+        for e in external_spec_problems(m["_spec_external"]):
+            fail("manifest", e)
     if "semver" not in m or "major" not in m:
         return
     if not SEMVER_RE.match(str(m["semver"])):

@@ -10,6 +10,7 @@
 # Per-environment secrets:  KONNECT_SPAT (system account scoped to that control plane ONLY),
 #                           TEST_CLIENT_ID, TEST_CLIENT_SECRET, TEST_SCOPE,
 #                           WRONG_ISSUER_TOKEN, LOW_SCOPE_TOKEN (optional)
+# Repository secret:        SPEC_REPO_TOKEN (optional; read access to repos that hold external OAS files)
 # Per-environment variables: KONNECT_CONTROL_PLANE_ID, TFSTATE_RESOURCE_GROUP, TFSTATE_STORAGE_ACCOUNT,
 #                           TFSTATE_CONTAINER, ARM_CLIENT_ID, ARM_TENANT_ID, ARM_SUBSCRIPTION_ID
 name: deploy-target
@@ -64,7 +65,7 @@ jobs:
           pip install -q pyyaml
           eval "$(cd ../../scripts && python - <<'PY'
           from common import load_manifest
-          m = load_manifest('../manifests/${{ inputs.manifest }}.yaml')
+          m = load_manifest('../manifests/${{ inputs.manifest }}.yaml', fetch=False)
           print(f"API={m['api']}; MAJOR={m['major']}")
           PY
           )"
@@ -169,6 +170,7 @@ jobs:
           TEST_SCOPE: ${{ secrets.TEST_SCOPE }}
           WRONG_ISSUER_TOKEN: ${{ secrets.WRONG_ISSUER_TOKEN }}
           LOW_SCOPE_TOKEN: ${{ secrets.LOW_SCOPE_TOKEN }}
+          SPEC_REPO_TOKEN: ${{ secrets.SPEC_REPO_TOKEN }}   # only for specs in other repos
         run: |
           pip install -q pyyaml
           args=(--manifest ../manifests/${{ inputs.manifest }}.yaml --target ${{ inputs.target }}
@@ -195,7 +197,7 @@ jobs:
         run: |
           eval "$(python - <<'PY'
           from common import load_manifest
-          m = load_manifest('../manifests/${{ inputs.manifest }}.yaml')
+          m = load_manifest('../manifests/${{ inputs.manifest }}.yaml', fetch=False)
           print(f"API={m['api']}; MAJOR={m['major']}")
           PY
           )"

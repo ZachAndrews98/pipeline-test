@@ -2,7 +2,10 @@
 import hashlib
 import json
 import pathlib
+import os
 import re
+import subprocess
+import base64
 
 import yaml
 
@@ -27,11 +30,73 @@ def sha256_file(path):
     return hashlib.sha256(pathlib.Path(path).read_bytes()).hexdigest()
 
 
-def load_manifest(path):
+EXTERNAL_DIR = ROOT / ".external-specs"
+PINNED_REF_RE = re.compile(r"^([0-9a-f]{40}|v?\d+\.\d+\.\d+[0-9A-Za-z.+-]*)$")
+
+
+def external_spec_problems(spec):
+    """Validation errors for a `spec:` mapping that points at another repository."""
+    errs = []
+    if not isinstance(spec.get("repo"), str) or not re.fullmatch(r"[\w.-]+/[\w.-]+", spec["repo"]):
+        errs.append("spec.repo must be 'owner/name'")
+    ref = spec.get("ref")
+    if not isinstance(ref, str) or not PINNED_REF_RE.match(ref):
+        errs.append("spec.ref must be a full commit SHA or a semver release tag (branches are mutable)")
+    path = spec.get("path")
+    if not isinstance(path, str) or os.path.isabs(path) or ".." in pathlib.PurePosixPath(path).parts:
+        errs.append("spec.path must be a relative path inside the spec repository")
+    return errs
+
+
+def _external_dest(spec):
+    return EXTERNAL_DIR / (spec["repo"].replace("/", "__") + "@" + re.sub(r"[^\w.-]", "_", spec["ref"]))
+
+
+def fetch_external_spec(spec):
+    """Check out spec['repo'] at spec['ref'] (cached) and return the path of spec['path'].
+
+    Private repositories authenticate with the SPEC_REPO_TOKEN environment variable."""
+    errs = external_spec_problems(spec)
+    if errs:
+        raise ValueError("; ".join(errs))
+    dest = _external_dest(spec)
+    if not (dest / ".git").exists():
+        host = spec.get("host", "github.com")
+        auth = []
+        token = os.environ.get("SPEC_REPO_TOKEN")
+        if token:
+            cred = base64.b64encode(f"x-access-token:{token}".encode()).decode()
+            auth = ["-c", f"http.extraheader=Authorization: Basic {cred}"]
+        dest.mkdir(parents=True, exist_ok=True)
+        run = lambda *a: subprocess.run(["git", *a], cwd=dest, check=True,
+                                        stdout=subprocess.DEVNULL, env={**os.environ, "GIT_TERMINAL_PROMPT": "0"})
+        run("init", "-q")
+        run("remote", "add", "origin", f"https://{host}/{spec['repo']}.git")
+        run(*auth, "fetch", "-q", "--depth", "1", "origin", spec["ref"])
+        run("-c", "advice.detachedHead=false", "checkout", "-q", "--detach", "FETCH_HEAD")
+    resolved = (dest / spec["path"]).resolve()
+    if dest.resolve() not in resolved.parents:
+        raise ValueError("spec.path escapes the spec repository")
+    return resolved
+
+
+def load_manifest(path, fetch=True):
+    """Load a manifest. `spec` is a path relative to the manifest, or a mapping
+    {repo, ref, path[, host]} for an OAS file kept in a different repository.
+    fetch=False skips cloning the external repo (_spec_path is then the would-be location)."""
     path = pathlib.Path(path).resolve()
     m = load_yaml(path)
     m["_path"] = path
-    m["_spec_path"] = (path.parent / m["spec"]).resolve()
+    spec = m.get("spec")
+    if isinstance(spec, dict):
+        m["_spec_external"] = spec
+        if fetch:
+            m["_spec_path"] = fetch_external_spec(spec)
+        else:
+            m["_spec_path"] = (_external_dest(spec) / spec.get("path", "")).resolve()
+    else:
+        m["_spec_external"] = None
+        m["_spec_path"] = (path.parent / spec).resolve() if spec else None
     return m
 
 

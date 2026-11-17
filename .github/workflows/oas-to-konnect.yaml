@@ -118,6 +118,8 @@ jobs:
     needs: prepare
     if: needs.prepare.outputs.manifests != '[]'
     runs-on: ubuntu-latest
+    env:
+      SPEC_REPO_TOKEN: ${{ secrets.SPEC_REPO_TOKEN }}   # only needed for specs kept in other repos
     strategy:
       fail-fast: false
       matrix:
@@ -172,11 +174,21 @@ jobs:
             git rev-parse -q --verify "refs/tags/deployed/$t/$API-v$MAJOR" >/dev/null && { tag="deployed/$t/$API-v$MAJOR"; break; }
           done
           if [ -z "$tag" ]; then echo "No prod-deployed revision of $API v$MAJOR: first deployment."; exit 0; fi
-          rel=$(realpath --relative-to="$(git rev-parse --show-toplevel)" "$SPEC")
           prev="$RUNNER_TEMP/prev"; mkdir -p "$prev"
-          # restore the previous contract and every file next to it (referenced schemas)
-          git archive "$tag" "$(dirname "$rel")" | tar -x -C "$prev"
-          prevspec="$prev/$rel"
+          if EXT=$(python - <<'PY'
+          from common import load_manifest
+          print(load_manifest('../manifests/${{ matrix.manifest }}.yaml', fetch=False)["_spec_external"] is not None)
+          PY
+          ) && [ "$EXT" = "True" ]; then
+            # Spec lives in another repo: re-fetch the ref pinned by the previous prod manifest
+            git show "$tag:manifests/${{ matrix.manifest }}.yaml" > "$prev/manifest.yaml"
+            prevspec=$(python -c "from common import load_manifest; print(load_manifest('$prev/manifest.yaml')['_spec_path'])")
+          else
+            rel=$(realpath --relative-to="$(git rev-parse --show-toplevel)" "$SPEC")
+            # restore the previous contract and every file next to it (referenced schemas)
+            git archive "$tag" "$(dirname "$rel")" | tar -x -C "$prev"
+            prevspec="$prev/$rel"
+          fi
           oasdiff breaking  "$prevspec" "$SPEC" --format json > "$RUNNER_TEMP/breaking.json"  || true
           oasdiff changelog "$prevspec" "$SPEC" --format json > "$RUNNER_TEMP/changes.json"   || true
           echo "prev=$prevspec" >> "$GITHUB_OUTPUT"

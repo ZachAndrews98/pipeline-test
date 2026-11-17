@@ -26,7 +26,22 @@ scripts/
 
 GitHub only runs workflows from `<repo root>/.github/workflows/`, so this repo's layout is the repo root.
 
-## Flow
+## OAS files in another repository
+
+A manifest's `spec:` can be a path (as before) or a pinned reference to a file in a different repo:
+
+```yaml
+spec:
+  repo: example-org/legal-api-specs   # owner/name on github.com (optional `host:` for GHES)
+  ref: v1.0.0                         # full commit SHA or semver tag; branches are rejected
+  path: contracts/openapi.yaml
+```
+
+The scripts shallow-clone that ref into `.external-specs/` on demand, and relative `$ref`s resolve inside that repo.
+For a private repo, add a `SPEC_REPO_TOKEN` repository secret with read access. Because the ref is pinned,
+publishing a new contract version means bumping `ref` in the manifest, which triggers the pipeline, the
+EA-approval hash check and the oasdiff comparison against the last prod-deployed ref.
+
 
 ```
 PR / push to main / manual dispatch
@@ -58,9 +73,9 @@ One Terraform root per `(api, target, variant)` with its own state key, so an ap
 | Service `{domain}-{api}-v{major}-{int\|ext}` | upstream from `manifest.targets.<env>.upstream`; placeholder `mock.invalid` for mocks |
 | Route `{service}-{operationId}` | one per operation (D-09 default); host from `environments/<env>.yaml` |
 | `openid-connect` (per Route) | issuer from env, audience from manifest target, scopes from OAS `security`, roles from `x-required-roles` |
-| `request-validator` (per Route) | draft-4 body and parameter schemas derived from the OAS |
+| `oas-validation` (per Service) | validates body, header, query and path parameters against the dereferenced OAS contract |
 | `response-transformer` | `API-Version`, `X-Config-Revision`, and `X-Mock-Response` when mocked |
-| `rate-limiting`, `correlation-id`, `http-log` | Service-scoped baseline; values from the env file |
+| `rate-limiting`, `correlation-id`, `opentelemetry` | Service-scoped baseline; values from the env file |
 | `mocking` | mock/mixed only; spec is dereferenced and its paths re-prefixed to the gateway path |
 | `request-transformer` | strips the gateway prefix and applies the backend base path (live routes) |
 | Tags on every entity | `api`, `api-major`, `api-version`, `exposure`, `owner`, `lifecycle`, `env`, `backend` (+ `config-revision`, `managed-by`, `branch`) |

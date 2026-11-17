@@ -22,9 +22,6 @@ from common import (
 
 PLACEHOLDER_UPSTREAM = {"protocol": "http", "host": "mock.invalid", "port": 80, "path": None}
 REF_RE = re.compile(r"^\$\{konnect_[a-z_]+\.[A-Za-z0-9_]+\.id\}$")
-# OAS-only keywords that are not valid JSON Schema draft 4
-OAS_ONLY = {"nullable", "example", "examples", "xml", "externalDocs", "discriminator",
-            "deprecated", "readOnly", "writeOnly", "$schema"}
 
 
 def tf_escape(node):
@@ -36,56 +33,6 @@ def tf_escape(node):
     if isinstance(node, str) and not REF_RE.match(node):
         return node.replace("${", "$${").replace("%{", "%%{")
     return node
-
-
-def to_draft4(schema):
-    """Convert an (already dereferenced) OAS 3.0 schema to JSON Schema draft 4."""
-    if isinstance(schema, list):
-        return [to_draft4(s) for s in schema]
-    if not isinstance(schema, dict):
-        return schema
-    out = {}
-    for k, v in schema.items():
-        if k in OAS_ONLY or k.startswith("x-"):
-            continue
-        if k in ("properties", "patternProperties"):
-            out[k] = {pk: to_draft4(pv) for pk, pv in v.items()}
-        elif k in ("enum", "required", "type"):
-            out[k] = v
-        else:
-            out[k] = to_draft4(v)
-    if schema.get("nullable") and "type" in out:
-        t = out["type"] if isinstance(out["type"], list) else [out["type"]]
-        out["type"] = t + ["null"]
-    return out
-
-
-def plain(schema):
-    return json.dumps(to_draft4(schema), sort_keys=True)
-
-
-def param_schema(op):
-    out = []
-    for p in op["parameters"]:
-        if p["in"] not in ("query", "path", "header") or p["name"].lower() == "authorization":
-            continue
-        default_style = "form" if p["in"] == "query" else "simple"
-        style = p.get("style", default_style)
-        out.append({
-            "in": p["in"], "name": p["name"],
-            "required": bool(p.get("required", p["in"] == "path")),
-            "style": style, "explode": bool(p.get("explode", style == "form")),
-            "schema": plain(p.get("schema", {"type": "string"})),
-        })
-    return out
-
-
-def body_validation(op):
-    body = (op["op"].get("requestBody") or {}).get("content") or {}
-    types = list(body.keys())
-    json_type = next((t for t in types if t.split(";")[0].endswith("json")), None)
-    schema = plain(body[json_type]["schema"]) if json_type and "schema" in body[json_type] else None
-    return types, schema
 
 
 def has_example(op):
@@ -188,10 +135,16 @@ class Builder:
         rl = dict(env.get("rate_limit") or {"minute": 600, "policy": "local"})
         rl.update((self.tgt.get("rate_limit") or {}).get(self.variant, {}))
         self.plugin("rate-limiting", "rate_limiting", rl, {"service": {"id": svc}})
-        log = (env.get("logging") or {}).get("http_endpoint")
-        if log:
-            self.plugin("http-log", "http_log", {"http_endpoint": log, "method": "POST",
-                        "content_type": "application/json"}, {"service": {"id": svc}})
+        otel = (env.get("logging") or {}).get("otel_traces_endpoint")
+        if otel:
+            self.plugin("opentelemetry", "opentelemetry", {"traces_endpoint": otel,
+                        "resource_attributes": {"service.name": self.svc_name}}, {"service": {"id": svc}})
+        # Request validation against the (dereferenced, gateway-prefixed) OAS contract (4.5)
+        self.plugin("oas-validation", "oas_validation", {
+            "api_spec": self.mock_spec(), "api_spec_encoded": False,
+            "validate_request_body": True, "validate_request_header_params": True,
+            "validate_request_query_params": True, "validate_request_uri_params": True,
+            "verbose_response": True}, {"service": {"id": svc}})
         headers = [f"API-Version:{m['semver']}", f"X-Config-Revision:{self.revision}"]
         if self.mode == "mock":
             headers.append("X-Mock-Response:true")
@@ -235,17 +188,6 @@ class Builder:
             if roles:
                 oidc.update({"roles_required": roles, "roles_claim": ["roles"]})
             self.plugin("openid-connect", f"oidc_{label}", oidc, scope)
-
-            ctypes, body_schema = body_validation(op)
-            pschema = param_schema(op)
-            if body_schema or pschema:
-                cfg = {"version": "draft4", "verbose_response": True,
-                       "allowed_content_types": [c.split(";")[0] for c in ctypes] or ["application/json"]}
-                if body_schema:
-                    cfg["body_schema"] = body_schema
-                if pschema:
-                    cfg["parameter_schema"] = pschema
-                self.plugin("request-validator", f"validate_{label}", cfg, scope)
 
             if self.mode == "mixed" and self.is_mocked(oid):
                 self.plugin("response-transformer", f"resp_headers_{label}", {"add": {"headers":

@@ -29,13 +29,14 @@ def main():
 
     selected = []
     for p in manifests:
-        m = load_manifest(p)
+        m = load_manifest(p, fetch=False)
         rel_m = f"manifests/{p.name}"
-        spec_dir = str(m["_spec_path"].parent.relative_to(ROOT)) + "/"
+        # External specs are pinned by ref in the manifest, so a bump shows up as a manifest change.
+        spec_dir = None if m["_spec_external"] else str(m["_spec_path"].parent.relative_to(ROOT)) + "/"
         if a.manifest and a.manifest != "all":
             hit = p.stem == a.manifest or p.name == a.manifest
         else:
-            hit = run_all or rel_m in changed or any(c.startswith(spec_dir) for c in changed)
+            hit = run_all or rel_m in changed or (spec_dir and any(c.startswith(spec_dir) for c in changed))
         if hit:
             selected.append((p.stem, m))
 

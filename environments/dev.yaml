@@ -19,7 +19,7 @@ rate_limit:             # D-17 (counter scope) is open: document the effective l
 correlation_id:
   header_name: X-Correlation-ID
 logging:
-  http_endpoint: https://logs.dev.example.com/kong
+  otel_traces_endpoint: https://otel.dev.example.com/v1/traces
 # Plugins already enforced globally on this control plane (Phase 3.2). Used by the
 # policy check to compute the effective required-plugin set.
 global_plugins: [opentelemetry, correlation-id]

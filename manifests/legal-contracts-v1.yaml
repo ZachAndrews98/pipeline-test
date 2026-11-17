@@ -7,6 +7,12 @@ exposure: internal             # internal (default) | external | both  (D-20)
 owner: team-legal
 lifecycle: active              # active | preview | deprecated | sunset
 spec: ../specs/contracts/openapi.yaml
+# Or keep the OAS file in a different repository (pinned: full commit SHA or semver tag; bump = new review).
+# Private repos need the SPEC_REPO_TOKEN secret. Relative $refs resolve inside that repo.
+# spec:
+#   repo: example-org/legal-api-specs
+#   ref: v1.0.0-alpha.1
+#   path: contracts/openapi.yaml
 
 backend:
   mode: mock                   # mock | live | mixed (mixed: dev/uat only)
